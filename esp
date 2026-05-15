@@ -1,0 +1,175 @@
+#include <ArduinoJson.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+// ----------------- Wi-Fi Credentials -----------------
+const char* ssid = "your ssid";
+const char* password = "your password";
+
+// ----------------- Backend URLs -----------------
+const char* backend_get_url  = "http://192.168.1.6:5000/get-data";    
+const char* backend_post_url = "http://192.168.1.6:5000/update-log";  
+
+// ----------------- Log Structure -----------------
+struct LogEntry {
+  String recognition_code;
+  String sender;
+  String receiver;
+  String ip;
+  int length;
+  String status;
+  String classifier;
+};
+
+// ----------------- Print Log -----------------
+void printLog(LogEntry log) {
+  Serial.print("Direction: OUT | Code: "); Serial.print(log.recognition_code);
+  Serial.print(" | From: "); Serial.print(log.sender);
+  Serial.print(" | To: "); Serial.print(log.receiver);
+  Serial.print(" | IP: "); Serial.print(log.ip);
+  Serial.print(" | Length: "); Serial.print(log.length);
+  Serial.print(" | Status: "); Serial.print(log.status);
+  Serial.print(" | Classifier: "); Serial.println(log.classifier);
+  Serial.println("------------------------");
+}
+
+// ----------------- Fetch Logs from Backend -----------------
+void fetchLogsFromBackend() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected");
+    return;
+  }
+
+  Serial.println("Fetching logs from backend...");
+  Serial.print("Backend GET URL: "); Serial.println(backend_get_url);
+
+  HTTPClient http;
+  http.begin(backend_get_url);
+  int httpCode = http.GET();
+
+  Serial.print("HTTP GET code: "); Serial.println(httpCode);
+
+  if (httpCode == 200) {
+    String payload = http.getString();
+    Serial.print("Payload length: "); Serial.println(payload.length());
+    // Print raw JSON payload
+    Serial.println(payload);
+
+    // Increased buffer size to avoid JSON parse errors
+    DynamicJsonDocument doc(24576);
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error) {
+      Serial.print("JSON parse error: "); Serial.println(error.c_str());
+      http.end();
+      return;
+    }
+
+    Serial.print("Number of logs fetched: "); Serial.println(doc.size());
+
+    for (JsonObject log : doc.as<JsonArray>()) {
+      LogEntry entry;
+      entry.recognition_code = String(log["tag"] | "");
+      entry.sender = String(log["sender"] | "");
+      entry.receiver = String(log["receiver"] | "");
+      entry.ip = String(log["ip"] | "");
+      entry.length = log["length"] | 0;
+      entry.status = String(log["status"] | "");
+      entry.classifier = String(log["class"] | "NORMAL");
+      printLog(entry);
+    }
+  } else {
+    Serial.println("Failed to fetch logs. Check backend IP, port, and network.");
+  }
+
+  http.end();
+}
+
+// ----------------- Send Log to Backend -----------------
+bool sendLogToBackend(LogEntry log) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected");
+    return false;
+  }
+
+  Serial.print("Sending log to backend: "); Serial.println(log.recognition_code);
+
+  HTTPClient http;
+  http.begin(backend_post_url);
+  http.addHeader("Content-Type", "application/json");
+
+  DynamicJsonDocument doc(512);
+  doc["tag"] = log.recognition_code;
+  doc["sender"] = log.sender;
+  doc["receiver"] = log.receiver;
+  doc["ip"] = log.ip;
+  doc["length"] = log.length;
+  doc["status"] = log.status;
+  doc["class"] = log.classifier;
+
+  String payload;
+  serializeJson(doc, payload);
+
+  int httpResponseCode = http.POST(payload);
+  Serial.print("HTTP POST code: "); Serial.println(httpResponseCode);
+
+  if (httpResponseCode > 0) {
+    String response = http.getString();
+    Serial.println("Response from backend:");
+    Serial.println(response);
+    http.end();
+    return true;
+  } else {
+    Serial.print("Error sending log: "); Serial.println(httpResponseCode);
+    http.end();
+    return false;
+  }
+}
+
+// ----------------- Simulate New Logs -----------------
+void processNewLogs() {
+  LogEntry newLogs[] = {
+    {"CPK-N", "DeviceX", "ServerX", "192.168.1.50", 28, "Safe", "NORMAL"},
+    {"CPK-C", "DeviceY", "External", "192.168.1.51", 42, "Overshare Detected", "CRITICAL"}
+  };
+
+  for (LogEntry log : newLogs) {
+    printLog(log);
+    sendLogToBackend(log);
+    delay(500); // small delay between POSTs
+  }
+}
+
+// ----------------- Setup -----------------
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println("Connecting to WiFi...");
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi connected!");
+  Serial.print("ESP32 IP: "); Serial.println(WiFi.localIP());
+
+  // Fetch logs at startup
+  fetchLogsFromBackend();
+}
+
+// ----------------- Loop -----------------
+void loop() {
+  // Send new logs
+  processNewLogs();
+
+  // Wait for backend to update
+  delay(5000);
+
+  // Fetch latest logs
+  fetchLogsFromBackend();
+
+  // Wait before next cycle
+  delay(10000);
+}
